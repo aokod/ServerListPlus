@@ -59,16 +59,20 @@ import net.minecrell.serverlistplus.core.util.FormattingCodes;
 import net.minecrell.serverlistplus.core.util.Helper;
 import net.minecrell.serverlistplus.core.util.Randoms;
 import net.minecrell.serverlistplus.core.util.UUIDs;
+import net.minecrell.serverlistplus.velocity.config.VelocityConf;
 import org.slf4j.Logger;
 
 import java.awt.image.BufferedImage;
+import java.net.InetSocketAddress;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 @Plugin(id = "serverlistplus", name = "ServerListPlus", version = "%version%",
     description = "%description%", url = "%url%", authors = {"%author%"})
@@ -174,12 +178,81 @@ public class VelocityPlugin implements ServerListPlusPlugin {
             StatusRequest request = core.createRequest(con.getRemoteAddress().getAddress());
 
             request.setProtocolVersion(con.getProtocolVersion().getProtocol());
-            con.getVirtualHost().ifPresent(request::setTarget);
+            
+            Optional<InetSocketAddress> virtualHostOpt = con.getVirtualHost();
+            virtualHostOpt.ifPresent(request::setTarget);
 
             final ServerPing ping = event.getPing();
             final ServerPing.Players players = ping.getPlayers().orElse(null);
             final ServerPing.Version version = ping.getVersion();
 
+            // Check if ping-passthrough should be enabled for this hostname
+            VelocityConf velocityConf = core.getConf(VelocityConf.class);
+            boolean usePassthrough = false;
+            Optional<RegisteredServer> targetServer = Optional.empty();
+
+            if (velocityConf != null && velocityConf.PingPassthrough.EnabledHostnames != null 
+                    && !velocityConf.PingPassthrough.EnabledHostnames.isEmpty() && virtualHostOpt.isPresent()) {
+                InetSocketAddress virtualHost = virtualHostOpt.get();
+                String hostname = virtualHost.getHostString();
+                
+                // Check if hostname is in the whitelist (case-insensitive comparison)
+                for (String enabledHostname : velocityConf.PingPassthrough.EnabledHostnames) {
+                    if (hostname.equalsIgnoreCase(enabledHostname)) {
+                        usePassthrough = true;
+                        
+                        // Check if there's a specific server mapping for this hostname
+                        // Try both the original hostname and the enabled hostname (in case of case differences)
+                        String mappedServer = velocityConf.PingPassthrough.ServerMappings.get(hostname);
+                        if (mappedServer == null) {
+                            mappedServer = velocityConf.PingPassthrough.ServerMappings.get(enabledHostname);
+                        }
+                        
+                        if (mappedServer != null) {
+                            targetServer = proxy.getServer(mappedServer);
+                        } else {
+                            // Try to resolve server using Velocity's normal resolution
+                            // This will use forced-hosts if configured
+                            targetServer = proxy.getServer(hostname);
+                            if (!targetServer.isPresent()) {
+                                targetServer = proxy.getServer(enabledHostname);
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+
+            // If ping-passthrough is enabled, ping the backend server
+            if (usePassthrough && targetServer.isPresent()) {
+                RegisteredServer server = targetServer.get();
+                try {
+                    // Ping the backend server with a timeout
+                    CompletableFuture<ServerPing> serverPingFuture = server.ping();
+                    ServerPing serverPing = serverPingFuture.get(2, TimeUnit.SECONDS);
+                    
+                    if (serverPing != null) {
+                        // Return the backend server's ORIGINAL response completely unmodified
+                        // This includes: MOTD, player count, server icon, player list, version info, etc.
+                        // No ServerListPlus customizations are applied when ping-passthrough is enabled
+                        event.setPing(serverPing);
+                        return;
+                    }
+                } catch (TimeoutException e) {
+                    logger.debug("Timeout while pinging backend server for passthrough: " + server.getServerInfo().getName());
+                } catch (Exception e) {
+                    logger.debug("Failed to ping backend server for passthrough: " + e.getMessage());
+                }
+                // Fall through to proxy MOTD if ping fails or times out
+            }
+
+            // Default behavior: use proxy MOTD with ServerListPlus customizations
+            // This is the normal behavior when hostname is NOT in the whitelist
+            applyProxyMOTD(event, request, ping, players, version);
+        }
+
+        private void applyProxyMOTD(ProxyPingEvent event, StatusRequest request, 
+                ServerPing ping, ServerPing.Players players, ServerPing.Version version) {
             StatusResponse response = request.createResponse(core.getStatus(),
                     // Return unknown player counts if it has been hidden
                     new ResponseFetcher() {
@@ -355,7 +428,15 @@ public class VelocityPlugin implements ServerListPlusPlugin {
 
     @Override
     public void initialize(ServerListPlusCore core) {
-
+        // Register Velocity-specific configuration with example
+        VelocityConf example = new VelocityConf();
+        example.PingPassthrough.EnabledHostnames = new ArrayList<>();
+        example.PingPassthrough.EnabledHostnames.add("example.com");
+        example.PingPassthrough.EnabledHostnames.add("192.168.1.100");
+        example.PingPassthrough.ServerMappings.put("example.com", "lobby");
+        example.PingPassthrough.ServerMappings.put("192.168.1.100", "hub");
+        
+        core.registerConf(VelocityConf.class, new VelocityConf(), example, "Velocity");
     }
 
     @Override
