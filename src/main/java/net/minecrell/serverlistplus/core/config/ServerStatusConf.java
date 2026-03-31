@@ -42,6 +42,8 @@ import java.util.Map;
         "",
         "Usage:",
         " - Add multiple entries for random messages.",
+        " - Hosts keys support single host, wildcard host/port (*), or a comma-separated list.",
+        "   Example: play.example.com, mc.example.com, Name/lobby, *:25565",
         " - You can use formatting codes (&c, &l etc) and hex RGB color codes (&#rrggbb).",
         " - Save the file with valid UTF-8 encoding for special characters.",
         " - Available placeholders:",
