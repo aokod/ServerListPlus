@@ -41,12 +41,14 @@ import com.velocitypowered.api.util.ProxyVersion;
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import net.minecrell.serverlistplus.core.ServerListPlusCore;
 import net.minecrell.serverlistplus.core.ServerListPlusException;
+import net.minecrell.serverlistplus.core.config.PassthroughConf;
 import net.minecrell.serverlistplus.core.config.PluginConf;
 import net.minecrell.serverlistplus.core.config.storage.InstanceStorage;
 import net.minecrell.serverlistplus.core.favicon.FaviconCache;
 import net.minecrell.serverlistplus.core.favicon.FaviconSource;
 import net.minecrell.serverlistplus.core.logging.ServerListPlusLogger;
 import net.minecrell.serverlistplus.core.logging.Slf4jServerListPlusLogger;
+import net.minecrell.serverlistplus.core.plugin.MaxPlayersProvider;
 import net.minecrell.serverlistplus.core.plugin.ScheduledTask;
 import net.minecrell.serverlistplus.core.plugin.ServerListPlusPlugin;
 import net.minecrell.serverlistplus.core.plugin.ServerType;
@@ -63,10 +65,12 @@ import net.minecrell.serverlistplus.velocity.config.VelocityConf;
 import org.slf4j.Logger;
 
 import java.awt.image.BufferedImage;
+import java.lang.reflect.Method;
 import java.net.InetSocketAddress;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
@@ -76,7 +80,7 @@ import java.util.concurrent.TimeoutException;
 
 @Plugin(id = "serverlistplus", name = "ServerListPlus", version = "%version%",
     description = "%description%", url = "%url%", authors = {"%author%"})
-public class VelocityPlugin implements ServerListPlusPlugin {
+public class VelocityPlugin implements ServerListPlusPlugin, MaxPlayersProvider {
 
     private static final LegacyComponentSerializer LEGACY_SERIALIZER = LegacyComponentSerializer.builder().hexColors().build();
 
@@ -88,6 +92,7 @@ public class VelocityPlugin implements ServerListPlusPlugin {
     private ServerListPlusCore core;
     private EventHandler<ProxyPingEvent> pingListener;
     private Object connectionListener;
+    private boolean legacyPassthroughWarningLogged;
 
     private FaviconCache<Favicon> faviconCache;
 
@@ -170,6 +175,20 @@ public class VelocityPlugin implements ServerListPlusPlugin {
     public final class PingListener implements EventHandler<ProxyPingEvent> {
         private PingListener() {}
 
+        private final class ResolvedPassthrough {
+            private final PassthroughConf.RuleConf rule;
+            private final String hostname;
+            private final String serverName;
+            private final ServerPing backendPing;
+
+            private ResolvedPassthrough(PassthroughConf.RuleConf rule, String hostname, String serverName, ServerPing backendPing) {
+                this.rule = rule;
+                this.hostname = hostname;
+                this.serverName = serverName;
+                this.backendPing = backendPing;
+            }
+        }
+
         @Override
         public void execute(ProxyPingEvent event) {
             if (core == null) return; // Too early, we haven't finished initializing yet
@@ -186,73 +205,22 @@ public class VelocityPlugin implements ServerListPlusPlugin {
             final ServerPing.Players players = ping.getPlayers().orElse(null);
             final ServerPing.Version version = ping.getVersion();
 
-            // Check if ping-passthrough should be enabled for this hostname
-            VelocityConf velocityConf = core.getConf(VelocityConf.class);
-            boolean usePassthrough = false;
-            Optional<RegisteredServer> targetServer = Optional.empty();
-
-            if (velocityConf != null && velocityConf.PingPassthrough.EnabledHostnames != null 
-                    && !velocityConf.PingPassthrough.EnabledHostnames.isEmpty() && virtualHostOpt.isPresent()) {
-                InetSocketAddress virtualHost = virtualHostOpt.get();
-                String hostname = virtualHost.getHostString();
-                
-                // Check if hostname is in the whitelist (case-insensitive comparison)
-                for (String enabledHostname : velocityConf.PingPassthrough.EnabledHostnames) {
-                    if (hostname.equalsIgnoreCase(enabledHostname)) {
-                        usePassthrough = true;
-                        
-                        // Check if there's a specific server mapping for this hostname
-                        // Try both the original hostname and the enabled hostname (in case of case differences)
-                        String mappedServer = velocityConf.PingPassthrough.ServerMappings.get(hostname);
-                        if (mappedServer == null) {
-                            mappedServer = velocityConf.PingPassthrough.ServerMappings.get(enabledHostname);
-                        }
-                        
-                        if (mappedServer != null) {
-                            targetServer = proxy.getServer(mappedServer);
-                        } else {
-                            // Try to resolve server using Velocity's normal resolution
-                            // This will use forced-hosts if configured
-                            targetServer = proxy.getServer(hostname);
-                            if (!targetServer.isPresent()) {
-                                targetServer = proxy.getServer(enabledHostname);
-                            }
-                        }
-                        break;
-                    }
-                }
+            ResolvedPassthrough passthrough = resolvePassthrough(virtualHostOpt);
+            if (passthrough != null) {
+                ServerPing.Players backendPlayers = passthrough.backendPing.getPlayers().orElse(null);
+                request.setPassthroughPlayerCount(passthrough.serverName,
+                        backendPlayers != null ? backendPlayers.getOnline() : null,
+                        backendPlayers != null ? backendPlayers.getMax() : null);
+                request.setPassthroughPlayerCount(passthrough.hostname,
+                        backendPlayers != null ? backendPlayers.getOnline() : null,
+                        backendPlayers != null ? backendPlayers.getMax() : null);
             }
 
-            // If ping-passthrough is enabled, ping the backend server
-            if (usePassthrough && targetServer.isPresent()) {
-                RegisteredServer server = targetServer.get();
-                try {
-                    // Ping the backend server with a timeout
-                    CompletableFuture<ServerPing> serverPingFuture = server.ping();
-                    ServerPing serverPing = serverPingFuture.get(2, TimeUnit.SECONDS);
-                    
-                    if (serverPing != null) {
-                        // Return the backend server's ORIGINAL response completely unmodified
-                        // This includes: MOTD, player count, server icon, player list, version info, etc.
-                        // No ServerListPlus customizations are applied when ping-passthrough is enabled
-                        event.setPing(serverPing);
-                        return;
-                    }
-                } catch (TimeoutException e) {
-                    logger.debug("Timeout while pinging backend server for passthrough: " + server.getServerInfo().getName());
-                } catch (Exception e) {
-                    logger.debug("Failed to ping backend server for passthrough: " + e.getMessage());
-                }
-                // Fall through to proxy MOTD if ping fails or times out
-            }
-
-            // Default behavior: use proxy MOTD with ServerListPlus customizations
-            // This is the normal behavior when hostname is NOT in the whitelist
-            applyProxyMOTD(event, request, ping, players, version);
+            applyProxyMOTD(event, request, ping, players, version, passthrough);
         }
 
         private void applyProxyMOTD(ProxyPingEvent event, StatusRequest request, 
-                ServerPing ping, ServerPing.Players players, ServerPing.Version version) {
+                ServerPing ping, ServerPing.Players players, ServerPing.Version version, ResolvedPassthrough passthrough) {
             StatusResponse response = request.createResponse(core.getStatus(),
                     // Return unknown player counts if it has been hidden
                     new ResponseFetcher() {
@@ -329,7 +297,209 @@ public class VelocityPlugin implements ServerListPlusPlugin {
                     builder.favicon(icon.get());
             }
 
+            if (passthrough != null && passthrough.rule.Fields != null) {
+                PassthroughConf.FieldsConf fields = passthrough.rule.Fields;
+                ServerPing backendPing = passthrough.backendPing;
+                ServerPing.Players backendPlayers = backendPing.getPlayers().orElse(null);
+                ServerPing.Version backendVersion = backendPing.getVersion();
+
+                if (fields.Motd && backendPing.getDescriptionComponent() != null) {
+                    builder.description(backendPing.getDescriptionComponent());
+                }
+                if (fields.PlayerCount && backendPlayers != null) {
+                    builder.onlinePlayers(backendPlayers.getOnline());
+                    builder.maximumPlayers(backendPlayers.getMax());
+                }
+                if (fields.PlayerHover) {
+                    builder.clearSamplePlayers();
+                    ServerPing.SamplePlayer[] backendSample = extractBackendSamplePlayers(backendPlayers);
+                    if (backendSample != null && backendSample.length > 0) {
+                        builder.samplePlayers(backendSample);
+                    }
+                }
+                if ((fields.VersionName || fields.ProtocolVersion) && backendVersion != null) {
+                    builder.version(new ServerPing.Version(
+                            fields.ProtocolVersion ? backendVersion.getProtocol() :
+                                    (version != null ? version.getProtocol() : backendVersion.getProtocol()),
+                            fields.VersionName ? backendVersion.getName() :
+                                    (version != null ? version.getName() : backendVersion.getName())
+                    ));
+                }
+                if (fields.Favicon) {
+                    builder.clearFavicon();
+                    Optional<Favicon> backendFavicon = extractBackendFavicon(backendPing);
+                    if (backendFavicon.isPresent()) {
+                        builder.favicon(backendFavicon.get());
+                    }
+                }
+            }
+
             event.setPing(builder.build());
+        }
+
+        private ResolvedPassthrough resolvePassthrough(Optional<InetSocketAddress> virtualHostOpt) {
+            if (!virtualHostOpt.isPresent()) {
+                return null;
+            }
+
+            VelocityConf velocityConf = core.getConf(VelocityConf.class);
+            if (velocityConf == null) {
+                return null;
+            }
+
+            String hostname = virtualHostOpt.get().getHostString();
+            PassthroughConf.RuleConf rule = findRule(velocityConf, hostname);
+            if (rule == null) {
+                return null;
+            }
+
+            Optional<RegisteredServer> targetServer = resolveTargetServer(rule, hostname);
+            if (!targetServer.isPresent()) {
+                return null;
+            }
+
+            RegisteredServer server = targetServer.get();
+            try {
+                CompletableFuture<ServerPing> serverPingFuture = server.ping();
+                ServerPing serverPing = serverPingFuture.get(2, TimeUnit.SECONDS);
+                if (serverPing != null) {
+                    return new ResolvedPassthrough(rule, hostname, server.getServerInfo().getName(), serverPing);
+                }
+            } catch (TimeoutException e) {
+                logger.debug("Timeout while pinging backend server for passthrough: " + server.getServerInfo().getName());
+            } catch (Exception e) {
+                logger.debug("Failed to ping backend server for passthrough: " + e.getMessage());
+            }
+
+            return null;
+        }
+
+        private PassthroughConf.RuleConf findRule(VelocityConf velocityConf, String hostname) {
+            List<PassthroughConf.RuleConf> rules = getConfiguredRules(velocityConf);
+            for (PassthroughConf.RuleConf rule : rules) {
+                if (rule == null || rule.Hosts == null) {
+                    continue;
+                }
+                for (String ruleHost : rule.Hosts) {
+                    if (ruleHost != null && hostname.equalsIgnoreCase(ruleHost)) {
+                        return rule;
+                    }
+                }
+            }
+            return null;
+        }
+
+        private List<PassthroughConf.RuleConf> getConfiguredRules(VelocityConf velocityConf) {
+            if (velocityConf.Passthrough != null && velocityConf.Passthrough.Rules != null
+                    && !velocityConf.Passthrough.Rules.isEmpty()) {
+                return velocityConf.Passthrough.Rules;
+            }
+
+            if (velocityConf.PingPassthrough == null || velocityConf.PingPassthrough.EnabledHostnames == null
+                    || velocityConf.PingPassthrough.EnabledHostnames.isEmpty()) {
+                return Collections.emptyList();
+            }
+
+            List<PassthroughConf.RuleConf> translatedRules = new ArrayList<>();
+            for (String host : velocityConf.PingPassthrough.EnabledHostnames) {
+                if (host == null) {
+                    continue;
+                }
+                PassthroughConf.RuleConf rule = new PassthroughConf.RuleConf();
+                rule.Hosts.add(host);
+                if (velocityConf.PingPassthrough.ServerMappings != null) {
+                    String mapped = findServerMapping(velocityConf.PingPassthrough.ServerMappings, host);
+                    if (mapped != null) {
+                        rule.TargetServer = mapped;
+                    }
+                }
+                rule.Fields.Motd = true;
+                translatedRules.add(rule);
+            }
+            return translatedRules;
+        }
+
+        private String findServerMapping(java.util.Map<String, String> mappings, String host) {
+            String mapped = mappings.get(host);
+            if (mapped != null) {
+                return mapped;
+            }
+            for (java.util.Map.Entry<String, String> entry : mappings.entrySet()) {
+                if (entry.getKey() != null && entry.getKey().equalsIgnoreCase(host)) {
+                    return entry.getValue();
+                }
+            }
+            return null;
+        }
+
+        private Optional<RegisteredServer> resolveTargetServer(PassthroughConf.RuleConf rule, String hostname) {
+            if (rule.TargetServer != null) {
+                return proxy.getServer(rule.TargetServer);
+            }
+
+            Optional<RegisteredServer> byHost = proxy.getServer(hostname);
+            if (byHost.isPresent()) {
+                return byHost;
+            }
+
+            if (rule.Hosts != null) {
+                for (String host : rule.Hosts) {
+                    if (host == null) {
+                        continue;
+                    }
+                    Optional<RegisteredServer> byRuleHost = proxy.getServer(host);
+                    if (byRuleHost.isPresent()) {
+                        return byRuleHost;
+                    }
+                }
+            }
+
+            return Optional.empty();
+        }
+
+        private ServerPing.SamplePlayer[] extractBackendSamplePlayers(ServerPing.Players backendPlayers) {
+            if (backendPlayers == null) {
+                return null;
+            }
+
+            try {
+                Method getSample = backendPlayers.getClass().getMethod("getSample");
+                Object sample = getSample.invoke(backendPlayers);
+                if (sample instanceof Collection) {
+                    Collection<?> collection = (Collection<?>) sample;
+                    ServerPing.SamplePlayer[] result = new ServerPing.SamplePlayer[collection.size()];
+                    int i = 0;
+                    for (Object obj : collection) {
+                        if (!(obj instanceof ServerPing.SamplePlayer)) {
+                            return null;
+                        }
+                        result[i++] = (ServerPing.SamplePlayer) obj;
+                    }
+                    return result;
+                } else if (sample instanceof ServerPing.SamplePlayer[]) {
+                    return (ServerPing.SamplePlayer[]) sample;
+                }
+            } catch (Exception ignored) {}
+
+            return null;
+        }
+
+        private Optional<Favicon> extractBackendFavicon(ServerPing backendPing) {
+            try {
+                Method getFavicon = backendPing.getClass().getMethod("getFavicon");
+                Object favicon = getFavicon.invoke(backendPing);
+                if (favicon instanceof Optional) {
+                    Optional<?> optional = (Optional<?>) favicon;
+                    if (!optional.isPresent()) {
+                        return Optional.empty();
+                    }
+                    Object value = optional.get();
+                    if (value instanceof Favicon) {
+                        return Optional.of((Favicon) value);
+                    }
+                }
+            } catch (Exception ignored) {}
+            return Optional.empty();
         }
     }
 
@@ -362,6 +532,24 @@ public class VelocityPlugin implements ServerListPlusPlugin {
         }
 
         return server.get().getPlayersConnected().size();
+    }
+
+    @Override
+    public Integer getMaxPlayers(String location) {
+        Optional<RegisteredServer> server = proxy.getServer(location);
+        if (!server.isPresent()) {
+            return null;
+        }
+
+        try {
+            ServerPing ping = server.get().ping().get(2, TimeUnit.SECONDS);
+            if (ping == null || !ping.getPlayers().isPresent()) {
+                return null;
+            }
+            return ping.getPlayers().get().getMax();
+        } catch (Exception ignored) {
+            return null;
+        }
     }
 
     @Override
@@ -430,11 +618,16 @@ public class VelocityPlugin implements ServerListPlusPlugin {
     public void initialize(ServerListPlusCore core) {
         // Register Velocity-specific configuration with example
         VelocityConf example = new VelocityConf();
-        example.PingPassthrough.EnabledHostnames = new ArrayList<>();
-        example.PingPassthrough.EnabledHostnames.add("example.com");
-        example.PingPassthrough.EnabledHostnames.add("192.168.1.100");
-        example.PingPassthrough.ServerMappings.put("example.com", "lobby");
-        example.PingPassthrough.ServerMappings.put("192.168.1.100", "hub");
+        PassthroughConf.RuleConf rule = new PassthroughConf.RuleConf();
+        rule.Hosts.add("example.com");
+        rule.TargetServer = "lobby";
+        rule.Fields.Motd = true;
+        rule.Fields.PlayerCount = true;
+        rule.Fields.PlayerHover = true;
+        rule.Fields.VersionName = true;
+        rule.Fields.ProtocolVersion = true;
+        rule.Fields.Favicon = true;
+        example.Passthrough.Rules.add(rule);
         
         core.registerConf(VelocityConf.class, new VelocityConf(), example, "Velocity");
     }
@@ -460,6 +653,16 @@ public class VelocityPlugin implements ServerListPlusPlugin {
 
     @Override
     public void configChanged(ServerListPlusCore core, InstanceStorage<Object> confs) {
+        VelocityConf velocityConf = confs.get(VelocityConf.class);
+        if (velocityConf != null
+                && velocityConf.PingPassthrough != null
+                && velocityConf.PingPassthrough.EnabledHostnames != null
+                && !velocityConf.PingPassthrough.EnabledHostnames.isEmpty()
+                && !legacyPassthroughWarningLogged) {
+            logger.warn("Velocity.PingPassthrough is deprecated. Please migrate to Velocity.Passthrough.Rules.");
+            legacyPassthroughWarningLogged = true;
+        }
+
         // Player tracking
         if (confs.get(PluginConf.class).PlayerTracking.Enabled) {
             if (connectionListener == null) {

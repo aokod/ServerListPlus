@@ -28,6 +28,9 @@ import net.minecrell.serverlistplus.core.util.Helper;
 
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.util.HashMap;
+import java.util.Locale;
+import java.util.Map;
 
 @Getter
 public class StatusRequest {
@@ -35,6 +38,7 @@ public class StatusRequest {
     private final PlayerIdentity identity;
     private @Setter Integer protocolVersion;
     private Target target;
+    private final Map<String, PlayerCount> passthroughPlayerCounts = new HashMap<>();
 
     public StatusRequest(InetAddress client, PlayerIdentity identity) {
         this.client = Preconditions.checkNotNull(client, "client");
@@ -69,6 +73,31 @@ public class StatusRequest {
         return new StatusResponse(this, status, fetcher);
     }
 
+    public void setPassthroughPlayerCount(String location, Integer online, Integer max) {
+        if (location == null) {
+            return;
+        }
+        passthroughPlayerCounts.put(normalizeLocation(location), new PlayerCount(online, max));
+    }
+
+    public Integer getPassthroughOnlinePlayers(String location) {
+        PlayerCount playerCount = getPassthroughPlayerCount(location);
+        return playerCount != null ? playerCount.online : null;
+    }
+
+    public Integer getPassthroughMaxPlayers(String location) {
+        PlayerCount playerCount = getPassthroughPlayerCount(location);
+        return playerCount != null ? playerCount.max : null;
+    }
+
+    private PlayerCount getPassthroughPlayerCount(String location) {
+        return location != null ? passthroughPlayerCounts.get(normalizeLocation(location)) : null;
+    }
+
+    private static String normalizeLocation(String location) {
+        return location.toLowerCase(Locale.ROOT);
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;
@@ -86,6 +115,12 @@ public class StatusRequest {
     public static class Target {
         private final @NonNull InetSocketAddress host;
         private final String name;
+    }
+
+    @Value
+    private static class PlayerCount {
+        private final Integer online;
+        private final Integer max;
     }
 
     /**

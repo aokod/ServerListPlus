@@ -16,27 +16,21 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-package net.minecrell.serverlistplus.velocity.config;
+package net.minecrell.serverlistplus.bungee.config;
 
 import net.minecrell.serverlistplus.core.config.PassthroughConf;
 import net.minecrell.serverlistplus.core.config.help.Description;
 
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-
 @Description({
         "Passthrough: Granular backend ping passthrough for matched hostnames.",
-        "  - ServerListPlus configuration is still applied first.",
-        "  - You can selectively overwrite individual fields from the backend ping response.",
+        "  - ServerListPlus configuration is applied first, then selected fields can",
+        "    be overwritten from the backend ping response.",
         "  - Fields: Motd, PlayerCount, PlayerHover, VersionName, ProtocolVersion, Favicon",
-        "  - Hosts: hostnames this rule matches (case-insensitive).",
-        "  - TargetServer: optional backend name in Velocity config.",
         "",
         "Example:",
         "  Rules:",
         "    - Hosts:",
-        "      - example.com",
+        "      - lobby.example.com",
         "      TargetServer: lobby",
         "      Fields:",
         "        Motd: true",
@@ -44,20 +38,8 @@ import java.util.Map;
         "        PlayerHover: true",
         "        VersionName: true",
         "        ProtocolVersion: true",
-        "        Favicon: true",
-        "",
-        "Legacy PingPassthrough.EnabledHostnames/ServerMappings is still supported",
-        "for compatibility and will be translated to Motd-only passthrough rules."
+        "        Favicon: true"
 })
-public class VelocityConf {
+public class BungeeConf {
     public PassthroughConf Passthrough = new PassthroughConf();
-    public LegacyPingPassthroughConf PingPassthrough = new LegacyPingPassthroughConf();
-
-    public static class LegacyPingPassthroughConf {
-        public List<String> EnabledHostnames = null;
-        public Map<String, String> ServerMappings = new HashMap<>();
-
-        public LegacyPingPassthroughConf() {}
-    }
 }
-

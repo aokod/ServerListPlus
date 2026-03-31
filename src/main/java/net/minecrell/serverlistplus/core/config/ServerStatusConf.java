@@ -46,8 +46,8 @@ import java.util.Map;
         " - Save the file with valid UTF-8 encoding for special characters.",
         " - Available placeholders:",
         "   - Player name: %player%",
-        "   - Player count: %online%, %max%, %online@server% %online@world%",
-        "   - Random online player name: %random_player%",
+        "   - Player count: %online%, %max%, %online@server%, %max@server%, %online@world%",
+        "   - Random online player name: %random_player%, %random_player@server%",
         "   - Ban reason: %ban_reason%",
         "   - Ban operator: %ban_operator%",
         "   - Ban experiation date: %ban_expiration_date%, %ban_expiration_datetime%"

@@ -21,6 +21,7 @@ package net.minecrell.serverlistplus.core.replacement;
 import lombok.Getter;
 import net.minecrell.serverlistplus.core.ServerListPlusCore;
 import net.minecrell.serverlistplus.core.config.PluginConf;
+import net.minecrell.serverlistplus.core.plugin.MaxPlayersProvider;
 import net.minecrell.serverlistplus.core.player.PlayerIdentity;
 import net.minecrell.serverlistplus.core.player.ban.BanProvider;
 import net.minecrell.serverlistplus.core.replacement.util.Patterns;
@@ -36,6 +37,23 @@ import java.util.regex.Pattern;
 public enum DefaultPatternPlaceholder implements DynamicPlaceholder {
     ONLINE_AT (Pattern.compile("%online@((?:\\w|[-_:])+)%")) {
         @Override
+        public String replace(final StatusResponse response, String s) {
+            final Matcher matcher = matcher(s);
+            final String unknown = response.getCore().getConf(PluginConf.class).Unknown.PlayerCount;
+            return Patterns.replace(matcher, s, new ContinousIterator<Object>() {
+                @Override
+                public Object next() {
+                    String location = matcher.group(1);
+                    Integer players = response.getRequest().getPassthroughOnlinePlayers(location);
+                    if (players == null) {
+                        players = response.getCore().getPlugin().getOnlinePlayers(location);
+                    }
+                    return players != null ? players : unknown;
+                }
+            });
+        }
+
+        @Override
         public String replace(final ServerListPlusCore core, String s) {
             final Matcher matcher = matcher(s);
             final String unknown = core.getConf(PluginConf.class).Unknown.PlayerCount;
@@ -43,6 +61,42 @@ public enum DefaultPatternPlaceholder implements DynamicPlaceholder {
                 @Override
                 public Object next() {
                     Integer players = core.getPlugin().getOnlinePlayers(matcher.group(1));
+                    return players != null ? players : unknown;
+                }
+            });
+        }
+    },
+    MAX_AT (Pattern.compile("%max@((?:\\w|[-_:])+)%")) {
+        @Override
+        public String replace(final StatusResponse response, String s) {
+            final Matcher matcher = matcher(s);
+            final String unknown = response.getCore().getConf(PluginConf.class).Unknown.PlayerCount;
+            return Patterns.replace(matcher, s, new ContinousIterator<Object>() {
+                @Override
+                public Object next() {
+                    String location = matcher.group(1);
+                    Integer players = response.getRequest().getPassthroughMaxPlayers(location);
+                    if (players == null) {
+                        if (response.getCore().getPlugin() instanceof MaxPlayersProvider) {
+                            players = ((MaxPlayersProvider) response.getCore().getPlugin()).getMaxPlayers(location);
+                        }
+                    }
+                    return players != null ? players : unknown;
+                }
+            });
+        }
+
+        @Override
+        public String replace(final ServerListPlusCore core, String s) {
+            final Matcher matcher = matcher(s);
+            final String unknown = core.getConf(PluginConf.class).Unknown.PlayerCount;
+            return Patterns.replace(matcher, s, new ContinousIterator<Object>() {
+                @Override
+                public Object next() {
+                    Integer players = null;
+                    if (core.getPlugin() instanceof MaxPlayersProvider) {
+                        players = ((MaxPlayersProvider) core.getPlugin()).getMaxPlayers(matcher.group(1));
+                    }
                     return players != null ? players : unknown;
                 }
             });
